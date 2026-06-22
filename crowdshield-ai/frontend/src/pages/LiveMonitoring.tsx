@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { Play, Cpu, Activity, User, HelpCircle, Layers, Sparkles, Send } from 'lucide-react';
 import { useWebSocket } from '../hooks/useWebSocket';
-import { API_V1 } from '../config/api';
+import { API_V1, API_BASE_URL } from '../config/api';
 import type { Video, SourceType } from '../types/video';
 import type { Detection, ZoneMetrics, RiskLevel, FlowArrow } from '../types/crowd';
 
@@ -35,13 +35,61 @@ export default function LiveMonitoring() {
   const [geminiApiKey, setGeminiApiKey] = useState('');
   const [geminiModel, setGeminiModel] = useState('');
 
+  // Video list and metrics states
+  const [videoList, setVideoList] = useState<Video[]>([]);
+  const [videoMetrics, setVideoMetrics] = useState<any[]>([]);
+
   // Load Gemini API Key and Model on mount
   useEffect(() => {
     const key = localStorage.getItem('GEMINI_API_KEY') || '';
     const mdl = localStorage.getItem('GEMINI_MODEL') || 'gemini-2.5-flash';
     setGeminiApiKey(key);
     setGeminiModel(mdl);
+
+    // Retrieve active video from localStorage
+    const savedVideoStr = localStorage.getItem('CS_ACTIVE_VIDEO');
+    if (savedVideoStr) {
+      try {
+        const savedVideo = JSON.parse(savedVideoStr);
+        setCurrentVideo(savedVideo);
+      } catch (e) {
+        console.error(e);
+      }
+    }
   }, []);
+
+  // Fetch list of previously uploaded/processed videos
+  useEffect(() => {
+    fetch(`${API_V1}/videos/`)
+      .then(res => res.json())
+      .then(data => {
+        if (data && data.videos) {
+          setVideoList(data.videos);
+        }
+      })
+      .catch(err => console.error('Failed to fetch videos:', err));
+  }, [currentVideo]);
+
+  // Fetch metrics file if video is processed
+  useEffect(() => {
+    if (source === 'upload' && currentVideo && currentVideo.status === 'processed') {
+      fetch(`${API_BASE_URL}/uploads/${currentVideo.id}_metrics.json`)
+        .then(res => {
+          if (!res.ok) throw new Error('Metrics file not found');
+          return res.json();
+        })
+        .then(data => {
+          setVideoMetrics(data);
+          console.log(`Loaded ${data.length} frames of telemetry metrics for video.`);
+        })
+        .catch(err => {
+          console.warn('Telemetry metrics file not found/loaded yet:', err);
+          setVideoMetrics([]);
+        });
+    } else {
+      setVideoMetrics([]);
+    }
+  }, [currentVideo, source]);
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -107,6 +155,24 @@ export default function LiveMonitoring() {
     autoConnect: true,
   });
 
+  const handleFrameUpdate = (frameMetrics: any) => {
+    setFrameNumber(frameMetrics.frame_number);
+    setOverallCri(frameMetrics.overall_cri);
+    setRiskLevel(frameMetrics.risk_level);
+    setTotalPersons(frameMetrics.total_persons);
+    setDetections(frameMetrics.detections || []);
+    setZones(frameMetrics.zones || []);
+    setHeatmapUrl(frameMetrics.heatmap_url || '');
+    setFlowArrows(frameMetrics.flow_arrows || []);
+
+    if (frameMetrics.metrics) {
+      setDensity(frameMetrics.metrics.density);
+      setVelocity(frameMetrics.metrics.velocity_avg);
+      setConsistency(frameMetrics.metrics.flow_consistency);
+      setPressure(frameMetrics.metrics.pressure_score);
+    }
+  };
+
   // Handle incoming WebSocket messages
   useEffect(() => {
     if (!lastMessage) return;
@@ -125,6 +191,11 @@ export default function LiveMonitoring() {
 
     // Handle crowd metrics updates
     if (lastMessage.type === 'crowd_update') {
+      // If we have loaded actual video metrics for local synced playback, ignore websocket telemetry
+      if (videoMetrics && videoMetrics.length > 0) {
+        return;
+      }
+
       // If we have an uploaded video being processed, filter to only its video_id
       // but allow through if video_id is null (general telemetry) or if no video selected yet
       if (source === 'upload' && currentVideo && lastMessage.video_id !== null && lastMessage.video_id !== currentVideo.id) {
@@ -147,7 +218,7 @@ export default function LiveMonitoring() {
         setPressure(lastMessage.metrics.pressure_score);
       }
     }
-  }, [lastMessage, currentVideo, source]);
+  }, [lastMessage, currentVideo, source, videoMetrics]);
 
   // Trigger processing on the backend
   const handleStartProcessing = async () => {
@@ -221,6 +292,19 @@ export default function LiveMonitoring() {
             </span>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <StatusBadge status={isConnected ? 'connected' : 'disconnected'} />
+              {source === 'upload' && currentVideo && (
+                <button
+                  className="btn btn-outline"
+                  onClick={() => {
+                    setCurrentVideo(null);
+                    localStorage.removeItem('CS_ACTIVE_VIDEO');
+                    setVideoMetrics([]);
+                  }}
+                  style={{ padding: '6px 12px', fontSize: '12px' }}
+                >
+                  Close Video
+                </button>
+              )}
               {source === 'upload' && currentVideo && currentVideo.status === 'uploaded' && (
                 <button
                   id="btn-process-video"
@@ -239,7 +323,39 @@ export default function LiveMonitoring() {
           <div style={{ padding: 'var(--space-md)' }}>
             {source === 'upload' ? (
               !currentVideo ? (
-                <VideoUploader onUploadSuccess={(video) => setCurrentVideo(video)} />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-md)' }}>
+                  <VideoUploader onUploadSuccess={(video) => {
+                    setCurrentVideo(video);
+                    localStorage.setItem('CS_ACTIVE_VIDEO', JSON.stringify(video));
+                  }} />
+                  {/* Select previously processed/uploaded videos */}
+                  {videoList.length > 0 && (
+                    <div className="glass-card" style={{ padding: 'var(--space-md)' }}>
+                      <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: 'var(--text-bright)', marginBottom: 8 }}>
+                        Or select a previously uploaded video:
+                      </label>
+                      <select
+                        className="form-input"
+                        onChange={(e) => {
+                          const vid = videoList.find(v => v.id === e.target.value);
+                          if (vid) {
+                            setCurrentVideo(vid);
+                            localStorage.setItem('CS_ACTIVE_VIDEO', JSON.stringify(vid));
+                          }
+                        }}
+                        defaultValue=""
+                        style={{ width: '100%', background: 'var(--bg-tertiary)', color: 'var(--text-bright)', border: '1px solid var(--border-color)', borderRadius: '6px', height: '36px', padding: '0 8px', fontSize: '13px' }}
+                      >
+                        <option value="" disabled>-- Select existing video --</option>
+                        {videoList.map(v => (
+                          <option key={v.id} value={v.id}>
+                            {v.original_filename} ({v.status.toUpperCase()})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-md)' }}>
                   <VideoPlayer
@@ -249,6 +365,8 @@ export default function LiveMonitoring() {
                     riskLevel={riskLevel}
                     heatmapUrl={heatmapUrl}
                     flowArrows={flowArrows}
+                    videoMetrics={videoMetrics}
+                    onFrameUpdate={handleFrameUpdate}
                   />
                   {processing && (
                     <div className="glass-card" style={{ padding: '12px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'rgba(6, 182, 212, 0.05)' }}>

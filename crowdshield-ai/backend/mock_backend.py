@@ -44,6 +44,40 @@ app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 # In-memory database for videos
 videos = {}
 
+# Scan uploads directory and populate videos database
+try:
+    for file in UPLOAD_DIR.glob("*.mp4"):
+        video_id = file.stem
+        if len(video_id) == 36:  # UUID string length
+            has_metrics = (UPLOAD_DIR / f"{video_id}_metrics.json").exists()
+            videos[video_id] = {
+                "id": video_id,
+                "filename": file.name,
+                "original_filename": f"crowd_sample_{video_id[:8]}.mp4",
+                "filepath": str(file),
+                "file_size": file.stat().st_size,
+                "mime_type": "video/mp4",
+                "duration": 18.0,
+                "fps": 30.0,
+                "width": 1280,
+                "height": 720,
+                "bitrate": 3000,
+                "codec": "h264",
+                "total_frames": 540,
+                "status": "processed" if has_metrics else "uploaded",
+                "processing_progress": 100.0 if has_metrics else 0.0,
+                "uploaded_at": datetime.now().isoformat(),
+                "processed_at": datetime.now().isoformat() if has_metrics else None
+            }
+            if has_metrics:
+                try:
+                    with open(UPLOAD_DIR / f"{video_id}_metrics.json") as f:
+                        videos[video_id]["frame_metrics"] = json.load(f)
+                except Exception:
+                    pass
+except Exception as e:
+    print(f"Startup uploads scan error: {e}")
+
 class VideoResponse(BaseModel):
     id: str
     filename: str
@@ -63,6 +97,20 @@ class VideoResponse(BaseModel):
     error_message: str | None = None
     uploaded_at: str
     processed_at: str | None = None
+
+# API GET routes for videos list/detail
+@app.get("/api/v1/videos/", response_model=dict)
+async def list_videos():
+    return {
+        "videos": list(videos.values()),
+        "total": len(videos)
+    }
+
+@app.get("/api/v1/videos/{video_id}", response_model=VideoResponse)
+async def get_video(video_id: str):
+    if video_id not in videos:
+        raise HTTPException(status_code=404, detail="Video not found")
+    return videos[video_id]
 
 class VideoProcessRequest(BaseModel):
     processing_fps: int = 10
@@ -292,8 +340,8 @@ async def process_video(video_id: str, request: VideoProcessRequest = VideoProce
         cap = cv2.VideoCapture(video["filepath"])
         if cap.isOpened():
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            # Pick 10 indices
-            num_samples = 10
+            # Pick more samples for smoother timeline playback
+            num_samples = min(60, max(10, total_frames // 5))
             indices = [int(i * total_frames / num_samples) for i in range(num_samples)]
             quota_exceeded = False
             active_tracks = {}
@@ -402,7 +450,7 @@ async def process_video(video_id: str, request: VideoProcessRequest = VideoProce
                 
                 frame_metrics.append(res)
                 
-                progress_pct = float((idx + 1) * 10)
+                progress_pct = round(float((idx + 1) / len(indices) * 100.0), 1)
                 video["processing_progress"] = progress_pct
                 await ws_manager.broadcast({
                     "video_id": video_id,
@@ -413,7 +461,7 @@ async def process_video(video_id: str, request: VideoProcessRequest = VideoProce
                 if ret and not quota_exceeded:
                     await asyncio.sleep(2.5)
                 else:
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.05)
             cap.release()
         else:
             error_msg = f"Failed to open video file {video['original_filename']}. The file might be corrupt or an invalid video format."
@@ -432,6 +480,15 @@ async def process_video(video_id: str, request: VideoProcessRequest = VideoProce
         video["frame_metrics"] = frame_metrics
         video["status"] = "processed"
         video["processed_at"] = datetime.now().isoformat()
+        
+        # Save complete frame metrics to JSON file for playback sync
+        metrics_file = UPLOAD_DIR / f"{video_id}_metrics.json"
+        try:
+            with open(metrics_file, "w") as f:
+                json.dump(frame_metrics, f)
+            print(f"Successfully wrote metrics to {metrics_file}")
+        except Exception as e:
+            print(f"Failed to write metrics file: {e}")
         
     asyncio.create_task(run_pipeline())
     return {"status": "processing"}

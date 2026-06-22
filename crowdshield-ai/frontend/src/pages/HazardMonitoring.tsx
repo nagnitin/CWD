@@ -25,10 +25,20 @@ export default function HazardMonitoring() {
 
   const [wsHazard, setWsHazard] = useState<any>(null);
 
-  // Sync state with incoming WebSocket metrics
-  useEffect(() => {
-    if (lastMessage && lastMessage.type === 'crowd_update' && lastMessage.scaffolding_hazard) {
-      const sh = lastMessage.scaffolding_hazard;
+  const handleIncomingData = (data: any) => {
+    if (data.type === 'crowd_update' && data.scaffolding_hazard) {
+      // If we have an active video, ignore mock websocket updates where video_id is null
+      const savedVideoStr = localStorage.getItem('CS_ACTIVE_VIDEO');
+      if (savedVideoStr) {
+        try {
+          const savedVideo = JSON.parse(savedVideoStr);
+          if (savedVideo && savedVideo.status === 'processed' && data.video_id === null) {
+            return;
+          }
+        } catch {}
+      }
+
+      const sh = data.scaffolding_hazard;
       setWsHazard(sh);
       setHistory(h => {
         const nextTick = h.length > 0 ? h[h.length - 1].tick + 1 : 1;
@@ -37,7 +47,62 @@ export default function HazardMonitoring() {
         return newHistory;
       });
     }
+  };
+
+  // Sync state with incoming WebSocket metrics
+  useEffect(() => {
+    if (lastMessage) {
+      handleIncomingData(lastMessage);
+    }
   }, [lastMessage]);
+
+  // Fetch metrics file and loop it locally to simulate live feed of the active video
+  useEffect(() => {
+    const savedVideoStr = localStorage.getItem('CS_ACTIVE_VIDEO');
+    if (savedVideoStr) {
+      try {
+        const savedVideo = JSON.parse(savedVideoStr);
+        if (savedVideo && savedVideo.status === 'processed') {
+          const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+          const url = `${apiUrl}/uploads/${savedVideo.id}_metrics.json`;
+          
+          let isMounted = true;
+          let intervalId: any = null;
+
+          fetch(url)
+            .then(res => {
+              if (!res.ok) throw new Error('Metrics not found');
+              return res.json();
+            })
+            .then(data => {
+              if (isMounted && data && data.length > 0) {
+                let index = 0;
+                intervalId = setInterval(() => {
+                  const item = data[index % data.length];
+                  handleIncomingData({
+                    type: 'crowd_update',
+                    video_id: savedVideo.id,
+                    frame_number: item.frame_number,
+                    scaffolding_hazard: item.scaffolding_hazard || { state: 'STATIC', displacement: 0.0, velocity: 0.0, severity: 'none' }
+                  });
+                  index++;
+                }, 200); // 5 Hz
+              }
+            })
+            .catch(err => {
+              console.warn('Failed to load local telemetry loop for hazard active video:', err);
+            });
+
+          return () => {
+            isMounted = false;
+            if (intervalId) clearInterval(intervalId);
+          };
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+  }, []);
 
   // Load API keys on mount
   useEffect(() => {

@@ -39,10 +39,20 @@ export default function Forecasting() {
     autoConnect: true,
   });
 
-  // Track incoming metrics
-  useEffect(() => {
-    if (lastMessage && lastMessage.type === 'crowd_update') {
-      if (lastMessage.video_id === null) {
+  const handleIncomingData = (data: any) => {
+    if (data.type === 'crowd_update') {
+      // If we have an active video, ignore mock websocket updates where video_id is null
+      const savedVideoStr = localStorage.getItem('CS_ACTIVE_VIDEO');
+      if (savedVideoStr) {
+        try {
+          const savedVideo = JSON.parse(savedVideoStr);
+          if (savedVideo && savedVideo.status === 'processed' && data.video_id === null) {
+            return;
+          }
+        } catch {}
+      }
+
+      if (data.video_id === null) {
         setNowCri(0);
         setNowRisk('safe');
         setNowHeatmap('');
@@ -51,12 +61,12 @@ export default function Forecasting() {
         return;
       }
 
-      const cri = lastMessage.overall_cri;
-      const risk = lastMessage.risk_level;
+      const cri = data.overall_cri;
+      const risk = data.risk_level;
       
       setNowCri(cri);
       setNowRisk(risk);
-      setNowHeatmap(lastMessage.heatmap_url || '');
+      setNowHeatmap(data.heatmap_url || '');
 
       // Store historical points
       setCriHistory((prev) => {
@@ -68,11 +78,69 @@ export default function Forecasting() {
       });
 
       // Capture forecast maps and data
-      if (lastMessage.forecasts) {
-        setForecasts(lastMessage.forecasts);
+      if (data.forecasts) {
+        setForecasts(data.forecasts);
       }
     }
+  };
+
+  // Track incoming WebSocket metrics
+  useEffect(() => {
+    if (lastMessage) {
+      handleIncomingData(lastMessage);
+    }
   }, [lastMessage]);
+
+  // Fetch metrics file and loop it locally to simulate live feed of the active video
+  useEffect(() => {
+    const savedVideoStr = localStorage.getItem('CS_ACTIVE_VIDEO');
+    if (savedVideoStr) {
+      try {
+        const savedVideo = JSON.parse(savedVideoStr);
+        if (savedVideo && savedVideo.status === 'processed') {
+          const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+          const url = `${apiUrl}/uploads/${savedVideo.id}_metrics.json`;
+          
+          let isMounted = true;
+          let intervalId: any = null;
+
+          fetch(url)
+            .then(res => {
+              if (!res.ok) throw new Error('Metrics not found');
+              return res.json();
+            })
+            .then(data => {
+              if (isMounted && data && data.length > 0) {
+                let index = 0;
+                intervalId = setInterval(() => {
+                  const item = data[index % data.length];
+                  handleIncomingData({
+                    type: 'crowd_update',
+                    video_id: savedVideo.id,
+                    frame_number: item.frame_number,
+                    overall_cri: item.overall_cri,
+                    risk_level: item.risk_level,
+                    heatmap_url: item.heatmap_url,
+                    forecasts: item.forecasts
+                  });
+                  index++;
+                }, 200); // 5 Hz
+              }
+            })
+            .catch(err => {
+              console.warn('Failed to load local telemetry loop for forecasting active video:', err);
+            });
+
+          return () => {
+            isMounted = false;
+            if (intervalId) clearInterval(intervalId);
+          };
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+  }, []);
 
   // Generate Gemini analysis
   const handleGenerateAnalysis = async () => {

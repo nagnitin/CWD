@@ -20,6 +20,8 @@ interface VideoPlayerProps {
   isLiveStream?: boolean;
   heatmapUrl?: string;
   flowArrows?: FlowArrow[];
+  videoMetrics?: any[];
+  onFrameUpdate?: (frameMetrics: any) => void;
 }
 
 interface FrameData {
@@ -39,6 +41,8 @@ export default function VideoPlayer({
   isLiveStream = false,
   heatmapUrl = '',
   flowArrows = [],
+  videoMetrics = [],
+  onFrameUpdate,
 }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -92,6 +96,23 @@ export default function VideoPlayer({
 
     const fps = video?.fps || 30;
     const currentFrame = Math.round(videoEl.currentTime * fps);
+
+    if (videoMetrics && videoMetrics.length > 0) {
+      let closest = videoMetrics[0];
+      let minDiff = Math.abs(videoMetrics[0].frame_number - currentFrame);
+      for (const item of videoMetrics) {
+        const diff = Math.abs(item.frame_number - currentFrame);
+        if (diff < minDiff) {
+          minDiff = diff;
+          closest = item;
+        }
+      }
+      return {
+        detections: closest.detections || [],
+        heatmapUrl: closest.heatmap_url || undefined,
+        flowArrows: closest.flow_arrows || [],
+      };
+    }
 
     // Scan backwards from current frame to find the nearest keyframe metrics
     let foundFrame = -1;
@@ -256,8 +277,28 @@ export default function VideoPlayer({
   };
 
   const handleTimeUpdate = () => {
-    if (videoRef.current) {
-      setCurrentTime(videoRef.current.currentTime);
+    if (!videoRef.current) return;
+    const time = videoRef.current.currentTime;
+    setCurrentTime(time);
+
+    if (videoMetrics && videoMetrics.length > 0) {
+      const fps = video?.fps || 30;
+      const currentFrame = Math.round(time * fps);
+
+      // Find the metric with the closest frame_number
+      let closest = videoMetrics[0];
+      let minDiff = Math.abs(videoMetrics[0].frame_number - currentFrame);
+      for (const item of videoMetrics) {
+        const diff = Math.abs(item.frame_number - currentFrame);
+        if (diff < minDiff) {
+          minDiff = diff;
+          closest = item;
+        }
+      }
+
+      if (closest && onFrameUpdate) {
+        onFrameUpdate(closest);
+      }
     }
   };
 

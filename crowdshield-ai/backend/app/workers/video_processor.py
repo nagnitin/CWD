@@ -44,6 +44,7 @@ async def _process_video_async(video_id: str, settings_dict: dict):
 
     # 2. Set up event pipeline callbacks
     redis = await get_redis()
+    frame_metrics_list = []
 
     async def on_frame(metrics: dict):
         # Save frame metrics to PostgreSQL
@@ -68,6 +69,9 @@ async def _process_video_async(video_id: str, settings_dict: dict):
             )
             db.add(metric_record)
             await db.commit()
+
+        # Save to accumulator for JSON dumping
+        frame_metrics_list.append(metrics)
 
         # Broadcast frame result to Redis pub/sub
         # Include video_id context so the clients can filter messages
@@ -100,6 +104,16 @@ async def _process_video_async(video_id: str, settings_dict: dict):
             on_frame=on_frame,
             on_progress=on_progress
         )
+        
+        # Save complete frame metrics to JSON file for playback sync
+        metrics_file = settings.upload_path / f"{video_id}_metrics.json"
+        try:
+            with open(metrics_file, "w") as f:
+                json.dump(frame_metrics_list, f)
+            logger.info(f"Successfully wrote metrics to {metrics_file}")
+        except Exception as ex:
+            logger.error(f"Failed to write metrics file: {ex}")
+
         return {
             "video_id": video_id,
             "status": "processed",

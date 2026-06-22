@@ -1,6 +1,6 @@
 /* Dashboard — main overview with 8-panel grid layout */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import {
   Users, Activity, Shield, TrendingUp,
   AlertTriangle, Cpu, Radio, Eye,
@@ -31,6 +31,17 @@ export default function Dashboard() {
 
   const handleMessage = useCallback((data: any) => {
     if (data.type === 'crowd_update') {
+      // If we have an active video, ignore the mock websocket feed messages (where video_id is null)
+      const savedVideoStr = localStorage.getItem('CS_ACTIVE_VIDEO');
+      if (savedVideoStr) {
+        try {
+          const savedVideo = JSON.parse(savedVideoStr);
+          if (savedVideo && savedVideo.status === 'processed' && data.video_id === null) {
+            return;
+          }
+        } catch {}
+      }
+
       setMetrics(data as CrowdSnapshot);
       setChartData((prev) => {
         const next = [...prev.slice(1), {
@@ -67,6 +78,60 @@ export default function Dashboard() {
       setActiveAlerts(newAlerts);
     }
   }, []);
+
+  // Fetch metrics file and loop it locally to simulate live feed of the active video
+  useEffect(() => {
+    const savedVideoStr = localStorage.getItem('CS_ACTIVE_VIDEO');
+    if (savedVideoStr) {
+      try {
+        const savedVideo = JSON.parse(savedVideoStr);
+        if (savedVideo && savedVideo.status === 'processed') {
+          const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+          const url = `${apiUrl}/uploads/${savedVideo.id}_metrics.json`;
+          
+          let isMounted = true;
+          let intervalId: any = null;
+
+          fetch(url)
+            .then(res => {
+              if (!res.ok) throw new Error('Metrics not found');
+              return res.json();
+            })
+            .then(data => {
+              if (isMounted && data && data.length > 0) {
+                let index = 0;
+                intervalId = setInterval(() => {
+                  const item = data[index % data.length];
+                  const wsMsg = {
+                    type: 'crowd_update',
+                    video_id: savedVideo.id,
+                    frame_number: item.frame_number,
+                    overall_cri: item.overall_cri,
+                    risk_level: item.risk_level,
+                    total_persons: item.total_persons,
+                    metrics: item.metrics,
+                    zones: item.zones,
+                    scaffolding_hazard: item.scaffolding_hazard || { state: 'STATIC', displacement: 0.0, velocity: 0.0, severity: 'none' }
+                  };
+                  handleMessage(wsMsg);
+                  index++;
+                }, 200); // 5 Hz
+              }
+            })
+            .catch(err => {
+              console.warn('Failed to load local telemetry loop for active video:', err);
+            });
+
+          return () => {
+            isMounted = false;
+            if (intervalId) clearInterval(intervalId);
+          };
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+  }, [handleMessage]);
 
   useWebSocket({
     url: '/ws/live',
